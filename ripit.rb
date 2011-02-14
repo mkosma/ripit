@@ -71,17 +71,32 @@ else
 end
 
 ############################################################
-# LOW LEVEL DEVICE CONTROL
+# DEVICE INFO
 ############################################################
 
-def disc_title(drive_num, dry_run=false)
+# return the cassette number for a given slot
+def cassette_num(slot_num)
+  raise "Invalid slot number" unless valid_slot?(slot_num)
+  slot_num / 50
+end
+
+def output_slot(slot_num)
+  raise "Invalid slot number" unless valid_slot?(slot_num)
+  slot_num+MAX_SLOTS
+end
+
+############################################################
+# DEVICE CONTROL
+############################################################
+
+def disc_title(drive_num)
   raise "Invalid drive number" unless valid_drive?(drive_num)
 
   title_cmd = "df | grep #{DRIVES[drive_num]}"
-  puts title_cmd if dry_run
+  puts title_cmd if $dry_run
   $log.info title_cmd
 
-  unless dry_run
+  unless $dry_run
     pid, stdin, stdout, stderr = Open4::popen4(title_cmd)
     ignored, status = Process::waitpid2(pid)
 
@@ -99,14 +114,14 @@ def disc_title(drive_num, dry_run=false)
   end
 end
 
-def disc_info(drive_num, dry_run=false)
+def disc_info(drive_num)
   raise "Invalid drive number" unless valid_drive?(drive_num)
 
   info_cmd = "dvdbackup --info --input=#{DRIVES[drive_num]}"
-  puts info_cmd if dry_run
+  puts info_cmd if $dry_run
   $log.info info_cmd
 
-  unless dry_run
+  unless $dry_run
     pid, stdin, stdout, stderr = Open4::popen4(info_cmd)
     ignored, status = Process::waitpid2(pid)
 
@@ -120,21 +135,21 @@ def disc_info(drive_num, dry_run=false)
   end
 end
 
-def log_disc_info(drive_num, dry_run=false)
-  title=disc_title(drive_num, dry_run)
-  info=disc_info(drive_num, dry_run)
+def log_disc_info(drive_num)
+  title=disc_title(drive_num)
+  info=disc_info(drive_num)
   File.open("#{RIPDIR}/#{title}.log", 'w') {|f| f.puts info}
 end
 
-def load_disc(slot_num, drive_num, dry_run=false)
+def load_disc(slot_num, drive_num)
   raise "Invalid slot number" unless valid_slot?(slot_num)
   raise "Invalid drive number" unless valid_drive?(drive_num)
 
   load_cmd = "mtx -f #{CAROUSEL_DEVICE} load #{slot_num} #{drive_num}"
-  puts load_cmd if dry_run
+  puts load_cmd if $dry_run
   $log.info load_cmd
 
-  unless dry_run
+  unless $dry_run
     pid, stdin, stdout, stderr = Open4::popen4(load_cmd)
     ignored, status = Process::waitpid2(pid)
 
@@ -142,19 +157,19 @@ def load_disc(slot_num, drive_num, dry_run=false)
     $log.info "status:\t#{status}"
     $log.info "stdout:#{stdout.readlines.to_s}"
     $log.info "stderr:#{stderr.readlines.to_s}"
-    disc_title(drive_num, dry_run)
+    disc_title(drive_num)
   end
 end
 
-def unload_disc(slot_num, drive_num, dry_run=false)
+def unload_disc(slot_num, drive_num)
   raise "Invalid slot number" unless valid_slot?(slot_num)
   raise "Invalid drive number" unless valid_drive?(drive_num)
 
   unload_cmd = "mtx -f #{CAROUSEL_DEVICE} unload #{slot_num} #{drive_num}"
-  puts unload_cmd if $DEBUG || dry_run
+  puts unload_cmd if $dry_run
   $log.info unload_cmd
 
-  unless dry_run
+  unless $dry_run
     pid, stdin, stdout, stderr = Open4::popen4(unload_cmd)
     ignored, status = Process::waitpid2(pid)
 
@@ -163,18 +178,26 @@ def unload_disc(slot_num, drive_num, dry_run=false)
     $log.info "stdout:#{stdout.readlines.to_s}"
     $log.info "stderr:#{stderr.readlines.to_s}"
     $log.info `df | grep #{DRIVES[drive_num]}`
-    disc_title(drive_num, dry_run)
+    disc_title(drive_num)
   end
 end
 
-def rip_disc(drive_num, dry_run=false)
+# should I ever do this? takes 20 min. but may save headaches.
+def slot_status()
+end
+
+def rip_disc(drive_num, use_generic_title=false)
   raise "Invalid drive number" unless valid_drive?(drive_num)
 
   rip_cmd = "dvdbackup --mirror --input=#{DRIVES[drive_num]} --output=#{RIPDIR}"
-  puts rip_cmd if $DEBUG || dry_run
+  
+  # if use_generic_title is true, we need to create a unique title
+  ripcmd += '--name="' + "generic_rip #{Time.now}" + '"' if use_generic_title
+
+  puts rip_cmd if $dry_run
   $log.info rip_cmd
 
-  unless dry_run
+  unless $dry_run
     pid, stdin, stdout, stderr = Open4::popen4(rip_cmd)
     ignored, status = Process::waitpid2(pid)
 
@@ -183,24 +206,69 @@ def rip_disc(drive_num, dry_run=false)
     # 1 on usage error
     # 2 on title name error
     # -1 on failure
+    case status
+      when 1
+        $log.error "command usage error!"
+      when 2
+      if use_generic_title
+        $log.error "error ripping with generic name!"
+      end
+        $log.info "title has generic name; retrying"
+      when 
+    end
+    $log.error "command usage error!" if status==1
+    if status==2
+
+      $log.warn "title name invalid"
+      if use_generic_title
+      end
+    end
+    $log.warn "title name invalid" if status==
 
     $log.info "status:\t#{status}"
     $log.info "stdout:#{stdout.readlines.to_s}"
     $log.info "stderr:#{stderr.readlines.to_s}"
     $log.info `df | grep #{DRIVES[drive_num]}`
-    disc_title(drive_num, dry_run)
+    disc_title(drive_num)
   end
-  log_disc_info(drive_num, dry_run)
+  log_disc_info(drive_num)
 end
 
-$log.info ARGV 
-case cmd
-  when "load"   then load_disc(opts[:slot], opts[:drive], opts[:dry_run])
-  when "unload" then unload_disc(opts[:slot], opts[:drive], opts[:dry_run])
-  when "rip"    then rip_disc(opts[:drive], opts[:dry_run])
-  when "info"   then puts disc_info(opts[:drive], opts[:dry_run])
-  when "title"  then puts disc_title(opts[:drive], opts[:dry_run])
+##########################################################
+# RIPPING OPERATIONS
+##########################################################
+
+
+def rip_all_discs
+  # fork off two processes
+  
+  # rip odd-numbered 
+  spawn (1..MAX_SLOTS).step(2) { |o| process_rip(o) }
+  # rip even-numbered
+  spawn (2..MAX_SLOTS).step(2) { |e| process_rip(e)}
+
+  # wait for them to finish
 end
+
+
+##########################################################
+# MAIN BODY
+##########################################################
+
+# record the command & start time in the log
+$log.info ARGV 
+$dry_run = opts[:dry_run]
+
+# process the command
+case cmd
+  when "load"   then load_disc(opts[:slot], opts[:drive])
+  when "unload" then unload_disc(opts[:slot], opts[:drive])
+  when "rip"    then rip_disc(opts[:drive])
+  when "info"   then puts disc_info(opts[:drive])
+  when "title"  then puts disc_title(opts[:drive])
+end
+
+
 
 # TODO: fail gracefully and return disc to original slot on error
 # TODO: cartridge-level ops
