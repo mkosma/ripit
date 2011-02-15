@@ -17,6 +17,7 @@ require 'open4'
 
 CAROUSEL_DEVICE='/dev/sg8'
 MAX_SLOTS=350
+FIRST_ERR_SLOT=701 # need to check that this works
 DRIVES=['/dev/sr1', '/dev/sr2']
 RIPDIR='/rip'
 
@@ -111,6 +112,8 @@ def disc_title(drive_num)
     title = title[1] if title
     $log.info "title:\t#{title}"
     return title
+
+    # add error checking to return nil on error or false on disc not in drive
   end
 end
 
@@ -135,13 +138,14 @@ def disc_info(drive_num)
   end
 end
 
-def log_disc_info(drive_num)
+def log_disc_info(drive_num, error=false)
   title=disc_title(drive_num)
   info=disc_info(drive_num)
   File.open("#{RIPDIR}/#{title}.log", 'w') {|f| f.puts info}
+  File.open("#{RIPDIR}/error.log", "w") { |f| f.puts error } if error
 end
 
-def load_disc(slot_num, drive_num)
+def load_disc(drive_num, slot_num)
   raise "Invalid slot number" unless valid_slot?(slot_num)
   raise "Invalid drive number" unless valid_drive?(drive_num)
 
@@ -161,7 +165,7 @@ def load_disc(slot_num, drive_num)
   end
 end
 
-def unload_disc(slot_num, drive_num)
+def unload_disc(drive_num, slot_num)
   raise "Invalid slot number" unless valid_slot?(slot_num)
   raise "Invalid drive number" unless valid_drive?(drive_num)
 
@@ -239,15 +243,58 @@ end
 ##########################################################
 
 
-def rip_all_discs
-  # fork off two processes
+def process_rip(slot)
+  # use drive 0 for even, drive 1 for odd source slots
+  drive = slot % 2
+  $log.info("Ripping slot #{slot} using drive #{drive}...")
   
-  # rip odd-numbered 
-  spawn (1..MAX_SLOTS).step(2) { |o| process_rip(o) }
-  # rip even-numbered
-  spawn (2..MAX_SLOTS).step(2) { |e| process_rip(e)}
+  # load disc from slot; if empty (false) or failure (nil), return
+  l = load_disc(drive, slot) || return l
+  
+  # wait for disc to mount
+  while disc_title(drive) == false
+    sleep 10
+  end
 
-  # wait for them to finish
+  # rip disc
+  r = rip_disc(drive) 
+  # log the disc info and set output slot to the "success" bank on success, original slot on error
+  out_slot = r ? output_slot(slot) : slot
+
+  log_disc_info(drive, r)
+  u = unload_disc(drive, out_slot)
+  # check for error, if slot is full return to overflow bank?
+  while !u 
+    # handle error on unloading disc
+    err_slot = FIRST_ERR_SLOT unless err_slot
+    $log.warn("Attempting alternate unload.")
+    u = unload_disc(drive, err_slot)
+  end
+
+  return r
+end
+
+def rip_all_discs
+  # run two ripping processes in parallel
+  results = []
+
+  # rip odd-numbered 
+  spawn (1..MAX_SLOTS).step(2) { |o| results[o]=process_rip(o) }
+  # rip even-numbered
+  spawn (2..MAX_SLOTS).step(2) { |e| results[e]=process_rip(e)}
+
+  # wait for things to finish
+  # how?
+
+  # generate summary report based on results array
+  
+  # create an output file to log all discs
+  File.open("rip_all.log", 'w') do |f|
+    # format and write summary report
+    successes = 1
+    failures = 2
+    empties = 3
+  end
 end
 
 
@@ -261,17 +308,9 @@ $dry_run = opts[:dry_run]
 
 # process the command
 case cmd
-  when "load"   then load_disc(opts[:slot], opts[:drive])
-  when "unload" then unload_disc(opts[:slot], opts[:drive])
+  when "load"   then load_disc(opts[:drive], opts[:slot])
+  when "unload" then unload_disc(opts[:drive], opts[:slot])
   when "rip"    then rip_disc(opts[:drive])
   when "info"   then puts disc_info(opts[:drive])
   when "title"  then puts disc_title(opts[:drive])
 end
-
-
-
-# TODO: fail gracefully and return disc to original slot on error
-# TODO: cartridge-level ops
-# TODO: looping ops
-
-
