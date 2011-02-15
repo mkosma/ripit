@@ -20,9 +20,6 @@ MAX_SLOTS=350
 DRIVES=['/dev/sr1', '/dev/sr2']
 RIPDIR='/rip'
 
-$log = Logger.new("#{RIPDIR}/ripit.log", 'daily')
-$log.level = Logger::INFO
-
 def valid_slot?(s)
   s.is_a?(Integer) && s >= 1 && s <= MAX_SLOTS
 end
@@ -57,6 +54,7 @@ EOS
   opt :drive, "Drive number (0-#{DRIVES.length-1})", :type => :int
   opt :slot, "Slot number (1-#{MAX_SLOTS})", :type => :int
   opt :dry_run, "Display commands without doing anything", :short => "-n"
+  opt :debug, "Display debugging information to console", :short => "-!"
 end
 
 cmd = ARGV.shift
@@ -69,6 +67,17 @@ if %w(rip info title).include? cmd
 else
   Trollop::die :slot, "must be a valid slot number" unless valid_slot?(opts[:slot])
 end
+
+$dry_run = opts[:dry_run]
+$debug = opts[:debug]
+
+############################################################
+# LOGGER
+############################################################
+
+$log = $debug ? Logger.new(STDOUT) : Logger.new("#{RIPDIR}/ripit.log", 'daily')
+$log.level = Logger::INFO
+
 
 ############################################################
 # DEVICE INFO
@@ -105,7 +114,7 @@ def disc_title(drive_num)
     $log.info "stderr:#{stderr.readlines.to_s}"
 
     title=stdout.readlines.to_s
-    $log.info "stdout:#{title}"
+    $log.info "stdout:\t#{title}"
 
     title = title.match(/media\/(.*)$/) if title
     title = title[1] if title
@@ -135,12 +144,6 @@ def disc_info(drive_num)
   end
 end
 
-def log_disc_info(drive_num)
-  title=disc_title(drive_num)
-  info=disc_info(drive_num)
-  File.open("#{RIPDIR}/#{title}.log", 'w') {|f| f.puts info}
-end
-
 def load_disc(slot_num, drive_num)
   raise "Invalid slot number" unless valid_slot?(slot_num)
   raise "Invalid drive number" unless valid_drive?(drive_num)
@@ -153,11 +156,21 @@ def load_disc(slot_num, drive_num)
     pid, stdin, stdout, stderr = Open4::popen4(load_cmd)
     ignored, status = Process::waitpid2(pid)
 
-    # TODO: add logic to deal with return code
-    $log.info "status:\t#{status}"
-    $log.info "stdout:#{stdout.readlines.to_s}"
-    $log.info "stderr:#{stderr.readlines.to_s}"
-    disc_title(drive_num)
+    case status
+      # success
+      when 0
+        $log.info "load successful."
+        return true
+      else
+        # status = 256 on failure
+        errmsg = stderr.gets
+        $log.warn "stdout:\t#{stdout.readlines.to_s}"
+        $log.warn "status:\t#{status}"
+        $log.warn "stderr:\t#{errmsg}"
+        $log.warn "No disc to load from slot #{slot_num}." if errmsg =~ /Empty/
+        $log.error "Cannot load into full drive #{drive_num}." if errmsg =~ /Full/
+        return nil
+    end
   end
 end
 
@@ -173,17 +186,27 @@ def unload_disc(slot_num, drive_num)
     pid, stdin, stdout, stderr = Open4::popen4(unload_cmd)
     ignored, status = Process::waitpid2(pid)
 
-    # TODO: add logic to deal with return code
-    $log.info "status:\t#{status}"
-    $log.info "stdout:#{stdout.readlines.to_s}"
-    $log.info "stderr:#{stderr.readlines.to_s}"
-    $log.info `df | grep #{DRIVES[drive_num]}`
-    disc_title(drive_num)
+    case status
+      # success
+      when 0
+        $log.info "unload successful."
+        return true
+      else
+        # status = 256 on failure
+        errmsg = stderr.gets
+        $log.warn "stdout:#{stdout.readlines.to_s}"
+        $log.warn "status:\t#{status}"
+        $log.warn "stderr:\t#{errmsg}"
+        $log.warn "No disc to unload from drive #{drive_num}." if errmsg =~ /Empty/
+        $log.error "Cannot unload drive #{drive_num} into full slot #{slot_num}." if errmsg =~ /Full/
+        return nil
+    end
   end
 end
 
 # should I ever do this? takes 20 min. but may save headaches.
 def slot_status()
+  # not yet implemented  
 end
 
 def rip_disc(drive_num, use_generic_title=false)
@@ -201,42 +224,39 @@ def rip_disc(drive_num, use_generic_title=false)
     pid, stdin, stdout, stderr = Open4::popen4(rip_cmd)
     ignored, status = Process::waitpid2(pid)
 
-    # TODO: add logic to deal with return code
-    # 0 on success
-    # 1 on usage error
-    # 2 on title name error
-    # -1 on failure
     case status
-      when 1
-        $log.error "command usage error!"
-      when 2
-      if use_generic_title
-        $log.error "error ripping with generic name!"
-      end
+      # success
+      when 0
+        $log.info "rip successful."
+        return true
+      # status 2 = occurs when disc title is blank / generic
+      when 2 && !use_generic_title
+        # call recursively if it has a generic name
         $log.info "title has generic name; retrying"
-      when 
+        return rip_disc(drive_num, true)
+      else
+        # status -1 = failure
+        # status  1 = usage error (should never occur)
+        # status  2 = title name error (should never occur if use_generic_title is true)
+        $log.error "ripping error!"
+        $log.error "status:\t#{status}"
+        $log.error "stdout:#{stdout.readlines.to_s}"
+        $log.error "stderr:#{stderr.readlines.to_s}"
+        return nil
     end
-    $log.error "command usage error!" if status==1
-    if status==2
-
-      $log.warn "title name invalid"
-      if use_generic_title
-      end
-    end
-    $log.warn "title name invalid" if status==
-
-    $log.info "status:\t#{status}"
-    $log.info "stdout:#{stdout.readlines.to_s}"
-    $log.info "stderr:#{stderr.readlines.to_s}"
-    $log.info `df | grep #{DRIVES[drive_num]}`
-    disc_title(drive_num)
   end
-  log_disc_info(drive_num)
 end
 
 ##########################################################
 # RIPPING OPERATIONS
 ##########################################################
+
+def log_disc_info(drive_num)
+  title=disc_title(drive_num)
+  info=disc_info(drive_num)
+  File.open("#{RIPDIR}/#{title}.log", 'w') {|f| f.puts info}
+end
+
 
 
 def rip_all_discs
@@ -257,7 +277,6 @@ end
 
 # record the command & start time in the log
 $log.info ARGV 
-$dry_run = opts[:dry_run]
 
 # process the command
 case cmd
