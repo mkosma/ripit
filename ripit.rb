@@ -267,8 +267,10 @@ def process_rip(slot)
   drive = slot % 2
   $log.info("Ripping slot #{slot} using drive #{drive}...")
   
-  # load disc from slot; if empty (false) or failure (nil), return
-  l = load_disc(drive, slot) || return l
+  # load disc from slot
+  l=load_disc(drive, slot) 
+  # if no disc (false) or a failure (nil), return
+  return l unless l
   
   # wait for disc to mount
   while disc_title(drive) == false
