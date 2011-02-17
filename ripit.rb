@@ -7,22 +7,47 @@
 #
 ##########################################################
 
-require 'logger'
 require 'trollop'
 require 'open4'
+# TODO: switch to color logging and tee to STDOUT
+#require 'log4r-color'
+#include Log4r
+require 'logger'
+
+# TODO: check for "not ready" status return by mtx - warn about front panel lockout
+
 
 ##########################################################
 # PARAMETERS & ERROR CHECKING
 ##########################################################
 
 CAROUSEL_DEVICE='/dev/sg8'
-MAX_SLOTS=350
-FIRST_ERR_SLOT=701 # need to check that this works
+
+FIRST_INPUT_SLOT=1
+LAST_INPUT_SLOT=350
+FIRST_OUTPUT_SLOT=401
+LAST_OUTPUT_SLOT=750
+FIRST_ERR_SLOT=751
+LAST_ERR_SLOT=770
+
+SLOTS_PER_CASSETTE=50
+
 DRIVES=['/dev/sr1', '/dev/sr2']
+
 RIPDIR='/rip'
 
-def valid_slot?(s)
-  s.is_a?(Integer) && s >= 1 && s <= MAX_SLOTS
+def valid_slot?(s, slot_type=:any)
+  return unless s.is_a?(Integer)
+  case slot_type
+    when :input
+      return s >= FIRST_INPUT_SLOT && s <= LAST_INPUT_SLOT
+    when :output
+      return s >= FIRST_OUTPUT_SLOT && s <= LAST_OUTPUT_SLOT
+    when :error
+      return valid_slot?(s, :input) || (s >= FIRST_ERR_SLOT && s <= LAST_ERR_SLOT)
+    else # :any
+      return valid_slot?(s, :input) || valid_slot?(s, :output) || valid_slot?(s, :error)
+  end
 end
 
 def valid_drive?(d)
@@ -32,7 +57,7 @@ end
 ##########################################################
 # COMMAND LINE PARSING
 ##########################################################
-COMMANDS = %w(load unload rip info title)
+COMMANDS = %w(load unload rip info title status test_all_cassettes rip_one rip_all)
 opts = Trollop::options do
   version "ripit.rb v1.0 (c) 2011 Fandor.com / Our Film Festival, Inc."
   banner <<-EOS
@@ -42,18 +67,28 @@ ripit.rb controls Fandor's Pioneer DRM-7000 DVD jukebox.
 Usage:
     ripit [action] [options]
 
-where [action] is one of
-  load    load from slot into drive
+where [action] is one of the following:
+
+main actions:
+  status  show status of all device slots
+  rip_one run rip process on a single slot
+  rip_all run rip process on all discs in robot
+
+test actions:
+  test_all_cassettes   test error state of all cassettes
+
+controller actions:
+  load    load from slot into specified drive
   unload  unload from drive into slot
-  rip     rip disc in drive
-  info    show info on disc in drive
-  title   show title of disc in drive
+  rip     rip disc in specified drive
+  info    show info on disc in specified drive
+  title   show title of disc in specified drive
 
 and [options] include:
 EOS
 
   opt :drive, "Drive number (0-#{DRIVES.length-1})", :type => :int
-  opt :slot, "Slot number (1-#{MAX_SLOTS})", :type => :int
+  opt :slot, "Slot number (#{FIRST_INPUT_SLOT}-#{LAST_ERR_SLOT})", :type => :int
   opt :dry_run, "Display commands without doing anything", :short => "-n"
   opt :debug, "Display debugging information to console", :short => "-!"
 end
@@ -62,11 +97,23 @@ cmd = ARGV.shift
 
 # validate options
 Trollop::die "Unknown command #{cmd}" unless COMMANDS.include?(cmd)
-Trollop::die :drive, "must be a valid drive number" unless valid_drive?(opts[:drive])
-if %w(rip info title).include? cmd
-  Trollop::die :slot, "should not be specified for a #{cmd} command" unless opts[:slot].nil?
+
+# most commands should include a drive number
+if %w(rip_all status test_all_cassettes rip_one).include? cmd
+  Trollop::die :drive, "should not be specified for a #{cmd} command" unless opts[:drive].nil?
+  if %w(rip_one).include? cmd
+    Trollop::die :slot, "must be a valid slot number" unless valid_slot?(opts[:slot])
+  else
+    Trollop::die :slot, "should not be specified for a #{cmd} command" unless opts[:slot].nil?
+  end
 else
-  Trollop::die :slot, "must be a valid slot number" unless valid_slot?(opts[:slot])
+  Trollop::die :drive, "must be a valid drive number" unless valid_drive?(opts[:drive])
+  # only some commands should include a slot number
+  if %w(rip info title).include? cmd
+    Trollop::die :slot, "should not be specified for a #{cmd} command" unless opts[:slot].nil?
+  else
+    Trollop::die :slot, "must be a valid slot number" unless valid_slot?(opts[:slot])
+  end
 end
 
 $dry_run = opts[:dry_run]
@@ -76,6 +123,10 @@ $debug = opts[:debug]
 # LOGGER
 ############################################################
 
+#Logger.global.level = ALL
+#formatter = 
+
+
 $log = $debug ? Logger.new(STDOUT) : Logger.new("#{RIPDIR}/ripit.log", 'daily')
 $log.level = Logger::INFO
 
@@ -84,15 +135,9 @@ $log.level = Logger::INFO
 # DEVICE INFO
 ############################################################
 
-# return the cassette number for a given slot
-def cassette_num(slot_num)
-  raise "Invalid slot number" unless valid_slot?(slot_num)
-  slot_num / 50
-end
-
 def output_slot(slot_num)
-  raise "Invalid slot number" unless valid_slot?(slot_num)
-  slot_num+MAX_SLOTS
+  raise "Invalid slot number" unless valid_slot?(slot_num, :input)
+  (slot_num-FIRST_INPUT_SLOT)+FIRST_OUTPUT_SLOT
 end
 
 ############################################################
@@ -110,19 +155,25 @@ def disc_title(drive_num)
     pid, stdin, stdout, stderr = Open4::popen4(title_cmd)
     ignored, status = Process::waitpid2(pid)
 
-    # TODO: add logic to deal with return code
-    $log.info "status:\t#{status}"
-    $log.info "stderr:#{stderr.readlines.to_s}"
+    case status
+      # success
+      when 0
+        $log.info "Title read successful."
+        title=stdout.readlines.to_s
+        $log.info "stdout:\t#{title}"
 
-    title=stdout.readlines.to_s
-    $log.info "stdout:\t#{title}"
-
-    title = title.match(/media\/(.*)$/) if title
-    title = title[1] if title
-    $log.info "title:\t#{title}"
-    return title
-
-    # add error checking to return nil on error or false on disc not in drive
+        title = title.match(/media\/(.*)$/) if title
+        title = title[1] if title
+        $log.info "title:\t#{title}"
+        return title
+      when 256
+        # status = 256 on empty drive / drive not ready
+        $log.warn "No disc in drive #{drive_num}"
+        return false
+      else
+        $log.error "Error reading disc title"
+        return nil
+    end
   end
 end
 
@@ -167,13 +218,18 @@ def load_disc(drive_num, slot_num)
         return true
       else
         # status = 256 on failure
-        errmsg = stderr.gets
-        $log.warn "stdout:\t#{stdout.readlines.to_s}"
-        $log.warn "status:\t#{status}"
-        $log.warn "stderr:\t#{errmsg}"
-        $log.warn "No disc to load from slot #{slot_num}." if errmsg =~ /Empty/
-        $log.error "Cannot load into full drive #{drive_num}." if errmsg =~ /Full/
-        return nil
+        errmsg = stderr.readlines.to_s
+        case errmsg
+          when /Empty/
+            $log.warn "No disc to load from slot #{slot_num}."
+            return false
+          when /Full/
+            $log.error "Cannot load into full drive #{drive_num}."
+            return nil
+          else
+            $log.error "Cartridge or device not ready loading from slot #{slot_num}."
+            return nil
+        end
     end
   end
 end
@@ -197,20 +253,54 @@ def unload_disc(drive_num, slot_num)
         return true
       else
         # status = 256 on failure
-        errmsg = stderr.gets
-        $log.warn "stdout:#{stdout.readlines.to_s}"
-        $log.warn "status:\t#{status}"
-        $log.warn "stderr:\t#{errmsg}"
-        $log.warn "No disc to unload from drive #{drive_num}." if errmsg =~ /Empty/
-        $log.error "Cannot unload drive #{drive_num} into full slot #{slot_num}." if errmsg =~ /Full/
-        return nil
+        errmsg = stderr.readlines.to_s
+        case errmsg
+          when /Empty/
+            $log.warn "No disc to unload from drive #{drive_num}."
+            return false
+          when /Full/
+            $log.error "Cannot unload drive #{drive_num} into full slot #{slot_num}."
+            return nil
+          else
+            $log.error "Cartridge or device not ready unloading into slot #{slot_num}."
+            return nil
+        end
     end
   end
 end
 
-# should I ever do this? takes 20 min. but may save headaches.
-def slot_status()
-  # not yet implemented  
+def device_status()
+  status_cmd = "mtx -f #{CAROUSEL_DEVICE} status"
+  puts status_cmd if $dry_run
+  $log.info status_cmd
+
+  unless $dry_run
+    pid, stdin, stdout, stderr = Open4::popen4(status_cmd)
+    ignored, status = Process::waitpid2(pid)
+
+    $log.info "status:\t#{status}"
+    $log.info "stderr:#{stderr.readlines.to_s}"
+
+    dev_status=stdout.readlines.to_s
+    $log.info "stdout:#{dev_status}"
+    return dev_status
+  end
+end
+
+def test_all_cassettes()
+  (1..LAST_ERR_SLOT).step(SLOTS_PER_CASSETTE) do |s|
+    begin
+      # nil is the only real "failure" case
+      if !load_disc(0, s).nil?
+        unload_disc(0, s)
+        puts "Slot #{s} - cassette tests okay."
+      else
+        puts "Slot #{s} - cassette missing or failed test."
+      end
+    rescue
+      puts "Slot #{s} - error."
+    end
+  end
 end
 
 def rip_disc(drive_num, use_generic_title=false)
@@ -218,8 +308,13 @@ def rip_disc(drive_num, use_generic_title=false)
 
   rip_cmd = "dvdbackup --mirror --input=#{DRIVES[drive_num]} --output=#{RIPDIR}"
   
-  # if use_generic_title is true, we need to create a unique title
-  ripcmd += '--name="' + "generic_rip #{Time.now}" + '"' if use_generic_title
+  if use_generic_title
+    # if use_generic_title is true, we need to create a unique "anonymous" title
+    ripcmd += '--name="' + "generic_rip #{Time.now}" + '"'
+  else
+    # check that the current disc's title is not already used (e.g., same-named disc or previously failed rip)
+    #MK TODO FIX THIS
+  end
 
   puts rip_cmd if $dry_run
   $log.info rip_cmd
@@ -265,15 +360,25 @@ end
 def process_rip(slot)
   # use drive 0 for even, drive 1 for odd source slots
   drive = slot % 2
-  $log.info("Ripping slot #{slot} using drive #{drive}...")
+  puts s="Ripping slot #{slot} using drive #{drive}..."
+  $log.info(s)
   
   # load disc from slot
   l=load_disc(drive, slot) 
   # if no disc (false) or a failure (nil), return
-  return l unless l
-  
+  unless l
+    if l==false 
+      puts s = "No disc in slot #{slot}"
+      $log.info(s)
+    else
+      puts s = "Error loading slot #{slot}"
+      $log.error(s)
+    end
+    return l
+  end
+
   # wait for disc to mount
-  while disc_title(drive) == false
+  while disc_title(drive)==false
     sleep 10
   end
 
@@ -285,12 +390,14 @@ def process_rip(slot)
   log_disc_info(drive, r)
   u = unload_disc(drive, out_slot)
   # check for error, if slot is full return to overflow bank?
-  while !u 
+  while !u
     # handle error on unloading disc
-    err_slot = FIRST_ERR_SLOT unless err_slot
-    $log.warn("Attempting alternate unload.")
-    u = unload_disc(drive, err_slot)
+    out_slot = (out_slot < FIRST_ERR_SLOT) ? FIRST_ERR_SLOT : out_slot + 1
+    raise "CRISIS:  ALL OUTPUT SLOTS FULL!" if out_slot > LAST_ERR_SLOT
+    $log.warn("Attempting alternate unload to slot #{out_slot}.")
+    u = unload_disc(drive, out_slot)
   end
+  s="Done ripping slot #{slot}, returned to slot #{out_slot}"
 
   return r
 end
@@ -302,10 +409,10 @@ def rip_all_discs()
 
   # fork to rip odd-numbered 
   pid = fork {
-    (1..MAX_SLOTS).step(2) { |o| results[o]=process_rip(o) }
+    (FIRST_INPUT_SLOT..LAST_INPUT_SLOT).step(2) { |o| results[o]=process_rip(o) }
   }   
   # rip even-numbered
-  (2..MAX_SLOTS).step(2) { |e| results[e]=process_rip(e)}
+  ((FIRST_INPUT_SLOT+1)..LAST_INPUT_SLOT).step(2) { |e| results[e]=process_rip(e)}
 
   # wait for things to finish
   Process.waitpid(pid)
@@ -316,8 +423,8 @@ def rip_all_discs()
   success = 0
   failure = 0
   empty = 0
-  results.each do |r|
-    case r
+  1.upto(LAST_INPUT_SLOT) do |i|
+    case results[i]
       when true
         success += 1
       when false
@@ -327,7 +434,7 @@ def rip_all_discs()
     end 
   end
 
-  File.open("rip_all.log", 'w') do |f|
+  File.open("#{RIPDIR}/rip_all.log", 'w') do |f|
     f.puts "rip_all operation completed:"
     f.puts "  Successful rips: #{success}"
     f.puts "  Empty slots:     #{empty}"
@@ -351,5 +458,8 @@ case cmd
   when "rip"     then rip_disc(opts[:drive])
   when "info"    then puts disc_info(opts[:drive])
   when "title"   then puts disc_title(opts[:drive])
+  when "status"  then puts device_status()
+  when "test_all_cassettes" then test_all_cassettes()
+  when "rip_one" then process_rip(opts[:slot])
   when "rip_all" then rip_all_discs()
 end
